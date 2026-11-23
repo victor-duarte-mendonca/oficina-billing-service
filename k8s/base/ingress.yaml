@@ -1,0 +1,49 @@
+# Roteamento por prefixo no Traefik (spec 12 §5): orçamento, pagamento e webhook vêm para cá; o resto continua no
+# OS Service (Ingress "/" do oficina-app). O Traefik prioriza a regra mais longa, então os serviços convivem.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: oficina-billing-ingress
+  namespace: oficina
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /admin/budgets
+            pathType: Prefix
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  name: http
+          - path: /admin/payments
+            pathType: Prefix
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  name: http
+          - path: /me/budgets
+            pathType: Prefix
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  name: http
+          - path: /public/budgets
+            pathType: Prefix
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  name: http
+          - path: /webhooks/mercadopago
+            pathType: Exact
+            backend:
+              service:
+                name: oficina-billing
+                port:
+                  name: http

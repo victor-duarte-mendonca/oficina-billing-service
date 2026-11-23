@@ -1,0 +1,57 @@
+# Billing Service local, com PostgreSQL próprio, SQS do LocalStack e o provedor de pagamento simulado (sem conta AWS
+# nem Mercado Pago).
+#   docker compose up --build
+#   Saúde: http://localhost:8083/q/health · OpenAPI: http://localhost:8083/q/openapi
+# A chave pública de TESTE do JWT é montada só para desenvolvimento; tokens de teste: src/test/.../TestTokens.java.
+# O e-mail do orçamento (com o código de autorização) aparece no log do contêiner (mailer em modo mock).
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: billing_db
+      POSTGRES_USER: billing
+      POSTGRES_PASSWORD: billing-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing -d billing_db"]
+      interval: 3s
+      retries: 20
+
+  localstack:
+    image: localstack/localstack:3.8.1
+    environment:
+      SERVICES: sqs
+    ports:
+      - "4567:4566"
+    volumes:
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      retries: 20
+
+  billing:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8083:8080"
+    environment:
+      # Perfil prod da imagem, com o que muda localmente: banco sem TLS, e-mail no log, simulação de pagamento.
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/billing_db
+      DB_USERNAME: billing
+      DB_PASSWORD: billing-local
+      MAILER_MOCK: "true"
+      PAYMENT_PROVIDER: simulated
+      PAYMENT_SIMULATION_ENABLED: "true"
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_ENDPOINT_OVERRIDE: http://localstack:4566
+      APP_MESSAGING_ENABLED: "true"
+      SQS_BILLING_COMMANDS_URL: http://localstack:4566/000000000000/oficina-local-billing-commands.fifo
+      SQS_OS_REPLIES_URL: http://localstack:4566/000000000000/oficina-local-os-saga-replies.fifo
+    volumes:
+      - ./src/test/resources/test-keys/publicKey.pem:/app/keys/publicKey.pem:ro

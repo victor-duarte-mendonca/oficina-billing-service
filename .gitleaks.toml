@@ -1,0 +1,11 @@
+# Regras padrão do gitleaks + exceção para o par de chaves de TESTE do JWT (sem valor fora dos testes; a chave de
+# produção é gerada no deploy e nunca entra no repositório).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Chaves de teste do JWT e exemplos de contrato"
+paths = [
+  '''src/test/resources/test-keys/.*''',
+  '''target/.*''',
+]

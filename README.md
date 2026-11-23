@@ -1,0 +1,179 @@
+# Oficina — Billing Service
+
+Microsserviço de **orçamento e pagamento** da oficina (Tech Challenge FIAP, Fase 4). Gera o orçamento e o envia ao
+cliente, registra a decisão, cobra por **Pix (Mercado Pago)**, confirma o pagamento e estorna quando a Saga pede.
+Quem orquestra é o **OS Service**; este serviço só responde aos comandos e publica os fatos.
+
+| | |
+|---|---|
+| Especificação | [`specs/fase4/05-billing-service-mercado-pago.md`](https://github.com/victor-duarte-mendonca/oficina-app/blob/homolog/specs/fase4/05-billing-service-mercado-pago.md) (no `oficina-app`) |
+| Banco | **PostgreSQL** próprio (Flyway `V1__baseline.sql`) |
+| Mensageria | SQS FIFO: consome `billing-commands`, publica em `os-saga-replies` |
+| Pagamento | `PaymentGatewayPort` com dois adapters: **Mercado Pago** (Payments API) e **simulado** (dev/hml/testes) |
+| Stack | Java 21, Quarkus 3.15.7, Hibernate ORM, SmallRye Fault Tolerance, AWS SDK v2, hexagonal |
+| Outros repositórios | [`oficina-app`](https://github.com/victor-duarte-mendonca/oficina-app) (OS + Saga), [`oficina-execution-service`](https://github.com/victor-duarte-mendonca/oficina-execution-service), [`oficina-infra-k8s`](https://github.com/victor-duarte-mendonca/oficina-infra-k8s), [`oficina-infra-database`](https://github.com/victor-duarte-mendonca/oficina-infra-database), [`oficina-auth-lambda`](https://github.com/victor-duarte-mendonca/oficina-auth-lambda) |
+
+## O que o serviço faz (e o que não faz)
+
+- **Faz:** orçamento a partir dos itens da OS; envio por e-mail com código de autorização de uso único; decisão pelo
+  link, pela área do cliente ou pelo atendimento; Pix com QR Code; confirmação por webhook **e** por reconciliação;
+  expiração de orçamento e de Pix; estorno.
+- **Não faz:** cadastro de cliente, veículo, peças ou OS (OS Service); fila de execução (Execution Service). Não lê o
+  banco de outro serviço: itens e cliente chegam no comando `GenerateBudget`. O CPF/CNPJ **não** é copiado para cá.
+
+```mermaid
+flowchart LR
+  OS[OS Service<br/>orquestrador da Saga] -- "GenerateBudget · RequestPayment · VoidBudget · RefundPayment" --> Q1[(SQS FIFO<br/>billing-commands)]
+  Q1 --> BI[Billing Service]
+  BI --> DB[(PostgreSQL<br/>budget · payment · inbox · outbox)]
+  BI -- "Budget* · Payment*" --> Q2[(SQS FIFO<br/>os-saga-replies)]
+  Q2 --> OS
+  BI <-- "Pix · consulta · estorno" --> MP[Mercado Pago]
+  MP -- "webhook" --> GW[API Gateway] --> BI
+  C[Cliente] -- "/public/budgets · /me/budgets" --> GW
+```
+
+## Papel na Saga
+
+| Gatilho | Resposta | Observação |
+|---|---|---|
+| `GenerateBudget` | `BudgetGenerated{budgetId,total,expiresAt}` ou `BudgetGenerationFailed{reason}` | total ≠ soma dos itens é recusado; repetido pela mesma Saga → mesma resposta, sem novo e-mail |
+| decisão do cliente/funcionário | `BudgetApproved{by}` / `BudgetRejected{by}` | `by` = `CLIENT_TOKEN`, `CLIENT_JWT` ou `STAFF`; mesma decisão repetida é idempotente |
+| prazo de aprovação vencido (job, 60 s) | `BudgetExpired` | |
+| `RequestPayment{budgetId,amount,attempt}` | `PaymentRequested{paymentId,expiresAt}` ou `PaymentRequestFailed{reason}` | valor tem de ser o total; a mesma tentativa nunca cobra duas vezes |
+| webhook / reconciliação | `PaymentApproved` / `PaymentRejected` / `PaymentExpired` | a situação vem de **consulta** ao provedor; pagamento aprovado depois do prazo também é avisado (a Saga estorna o órfão) |
+| `RefundPayment` (compensação) | `PaymentRefunded` ou `PaymentRefundFailed{detail}` | falha vira `REFUND_FAILED`; o retry manual da Saga abre nova tentativa |
+| `VoidBudget` (compensação) | `BudgetVoided` | sempre confirma (inclusive orçamento inexistente) |
+
+Contratos: [`contracts/`](contracts/) — este serviço é o dono de `billing-events.schema.json`; os demais são cópias.
+
+## Banco: por que PostgreSQL
+
+Dinheiro pede transação ACID, unicidade garantida pelo banco e trilha auditável. As duas regras mais importantes são
+índices únicos parciais, que valem mesmo com duas réplicas e duas mensagens concorrentes:
+
+| Regra | Como |
+|---|---|
+| Um orçamento vivo por OS | `ux_budget_active_work_order` (`status IN ('SENT','APPROVED')`) |
+| Um pagamento ativo por orçamento | `ux_payment_active_budget` (`REQUESTED, PENDING, APPROVED, REFUND_PENDING`) — testado com duas transações concorrentes |
+| Nenhuma cobrança duplicada | `idempotency_key` única, derivada de (orçamento, tentativa) e **gravada antes** de chamar o provedor |
+| Token nunca em claro | `approval_token_hash` (SHA-256); comparação em tempo constante |
+
+Tabelas: `budget`, `budget_line`, `payment`, `payment_event` (o que o provedor informou e por qual canal), `outbox`,
+`inbox`. RDS próprio ou *database* separado na instância atual é a decisão **D3** (aberta, spec 02).
+
+## Pagamento: o fluxo sem cobrança dupla
+
+```
+transação 1: pagamento REQUESTED + chave de idempotência
+fora de transação: POST /v1/payments (X-Idempotency-Key) — retry e circuit breaker no adapter
+transação 2: PENDING (QR Code) ou FAILED + resposta no outbox + comando marcado no inbox
+```
+
+Se o pod cair entre os passos, a reentrega encontra o pagamento `REQUESTED` e repete a chamada com a **mesma** chave: o
+provedor devolve a mesma cobrança. Pedido sem resposta por 5 min é encerrado como falha pela reconciliação.
+
+**Webhook (`POST /webhooks/mercadopago`)**: corpo ≤ 16 KB → assinatura `x-signature` (HMAC-SHA256) → do corpo só o
+`data.id` → **consulta** `GET /v1/payments/{id}` → transição idempotente. Assinatura inválida: 401 e
+`billing_webhook_invalid_signature_total`. Pagamento desconhecido: 200 (o provedor pararia de reenviar só com 2xx).
+Com o Mercado Pago real o segredo é obrigatório (sem segredo, toda notificação é recusada).
+
+**Resiliência**: timeouts 3 s (conexão) e 10 s (leitura); retry com backoff só em falha transitória (rede, 5xx, 429),
+sempre com a mesma chave; circuit breaker (SmallRye Fault Tolerance); com o provedor fora, a Saga recebe
+`PaymentRequestFailed`.
+
+### O que depende das credenciais de teste do Mercado Pago (usuário)
+
+O adapter segue a documentação, mas **não foi exercitado contra o sandbox**. Com as credenciais:
+
+1. `PAYMENT_PROVIDER=mercadopago`, `MP_ACCESS_TOKEN` e `MP_WEBHOOK_SECRET` (SSM, SecureString), `MP_NOTIFICATION_URL`
+   = rota do gateway.
+2. Confirmar: manifesto da assinatura (V3 da spec 05), nome `notification_url` (V2), situação de Pix vencido (V5),
+   como aprovar um Pix de teste (V4 — a doc da Orders API cita o pagador `APRO`).
+3. Regravar as respostas do `MercadoPagoPaymentGatewayTest` com o sandbox e registrar a evidência para o vídeo.
+
+A documentação marca a Payments API como legada e recomenda a Orders API para integrações novas (V1). A troca fica
+restrita ao adapter; o domínio e os casos de uso não mudam.
+
+## API (via API Gateway)
+
+| Método | Rota | Papel | Função |
+|---|---|---|---|
+| `GET` | `/admin/budgets/{orderNumber}` | ADMIN, MECHANIC | orçamento e todas as tentativas de pagamento |
+| `POST` | `/admin/budgets/{orderNumber}/approve` \| `/reject` | ADMIN | decisão dada por telefone (`by=STAFF`) |
+| `POST` | `/public/budgets/{orderNumber}/approve` \| `/reject` | público + `{token}` | link do e-mail; token errado = 404 igual a OS inexistente |
+| `GET` | `/me/budgets/{orderNumber}` | CLIENT | orçamento próprio (OS de outro cliente = 404) |
+| `POST` | `/me/budgets/{orderNumber}/approval` | CLIENT | `{decision: APPROVE\|REJECT}` |
+| `GET` | `/me/budgets/{orderNumber}/payment` | CLIENT | Pix atual: copia e cola, QR Code, validade, situação |
+| `POST` | `/webhooks/mercadopago` | assinatura | notificação de pagamento |
+| `POST` | `/admin/payments/{paymentId}/simulate` | ADMIN | **só dev/hml** com o provedor simulado: `{status: APPROVED\|REJECTED\|EXPIRED}` |
+
+OpenAPI em `/q/openapi`. Erros em JSON com `correlationId` e sem stacktrace: 400 entrada inválida, 401/403, 404, 409
+alteração concorrente, 422 regra de negócio, 503 provedor de pagamento fora.
+
+## Arquitetura interna (hexagonal)
+
+```
+domain/          Budget e Payment (aggregate roots), Money, ApprovalToken, SagaRef, BillingEvent (sealed)
+application/     BillingCommandHandler + strategies (GenerateBudget, RequestPayment, VoidBudget, RefundPayment),
+                 BudgetService (decisões e consultas), PaymentSyncService (webhook, reconciliação, expiração),
+                 EventPublisher, BillingMessageFactory, portas in/out — Java puro, sem anotações de framework
+infrastructure/  JPA (repositórios, outbox, inbox, TransactionRunner), SQS (consumidor, relay, jobs),
+                 Mercado Pago (API + adapter + assinatura), provedor simulado, e-mail, métricas, composição (CDI)
+interfaces/      REST (admin, cliente, público, webhook, simulação), filtros de correlação e de gateway, erros
+```
+
+Padrões: **Strategy** (um tratador por comando; provedor de pagamento escolhido por configuração), **Memento**
+(`Snapshot` dos agregados para persistir sem expor setters), **Transactional Outbox** e **Idempotent Consumer**,
+**Ports & Adapters** no provedor de pagamento, **Circuit Breaker**/**Retry** na chamada externa.
+
+## Como rodar localmente
+
+```bash
+docker compose up --build
+```
+
+Sobe PostgreSQL, LocalStack (SQS, filas criadas por `scripts/localstack-init.sh`) e o serviço em
+`http://localhost:8083`, com o provedor simulado e a rota de simulação ligados. O e-mail do orçamento (com o código)
+aparece no log do contêiner — o mailer em modo *mock* registra o corpo, por isso fica restrito ao uso local.
+
+## Testes, cobertura e qualidade
+
+```bash
+mvn verify   # exige Docker (PostgreSQL pelos Dev Services e LocalStack via Testcontainers)
+```
+
+| Tipo | Onde |
+|---|---|
+| Domínio | `BudgetTest`, `PaymentTest`, `ValueObjectsTest` — transições válidas e inválidas, idempotência, dinheiro, token |
+| Casos de uso | `BillingApplicationTest` — todos os comandos, decisões, webhook, reconciliação e expiração, sobre banco em memória com as mesmas garantias |
+| Contrato | `BillingContractTest` — os 13 eventos validam no schema; os comandos de exemplo do OS são tratados |
+| Adapter Mercado Pago | `MercadoPagoPaymentGatewayTest` — servidor HTTP local no formato documentado: cabeçalhos, corpo do Pix, QR Code, situações, erros transitórios × recusas |
+| Webhook | `WebhookResourceTest`, `WebhookSignatureTest` — assinatura inválida, corpo adulterado (a consulta prevalece), duplicado, desconhecido, tamanho |
+| Persistência | `PersistenceIntegrationTest` — dois pagamentos concorrentes (só um sobrevive), trava otimista, expiração com `SKIP LOCKED`, relay parando na primeira falha |
+| Fluxo pelas filas | `BillingFlowIntegrationTest` — comando na fila → banco → outbox → resposta, com correlação; entrega duplicada; estorno recusado |
+| API | `BillingApiTest` — três canais de decisão, 401/403/404/422/503, Pix do cliente, simulação |
+
+O `mvn verify` reprova abaixo de **80% de linhas e 70% de ramos** do serviço (e 80% nos pacotes de domínio e aplicação).
+Última medição local (2026-11-23): **138 testes, 94,7% de linhas, 85,3% de ramos**. Relatório: `target/site/jacoco/index.html`.
+
+## CI/CD
+
+`.github/workflows/ci.yml`: `build-test` (testes + gate), `docker-build` (imagem + Trivy), `secret-scan` (gitleaks em
+todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). O deploy no k3s entra com o banco e as filas
+(spec 12). Análise SonarCloud: spec 10.
+
+## Segurança
+
+- Valida o mesmo JWT RS256 do OS e do Lambda; o pod monta **só a chave pública**.
+- `X-Gateway-Key` obrigatório em toda rota de negócio (acesso direto ao nó é recusado); health e métricas livres.
+- Access token e segredo do webhook só por variável de ambiente vinda do SSM; nunca em log, erro ou repositório.
+- Rota pública: token de 256 bits, uso único, guardado como hash; resposta igual para token errado e OS inexistente.
+- Pod sem root, sistema de arquivos somente leitura, sem token de ServiceAccount, NetworkPolicy de menor privilégio.
+
+## Limitações conhecidas
+
+- O `LabRole` do AWS Academy é único: não há IAM por serviço (ADR 0022 no `oficina-app`).
+- Se o provedor criar o Pix e a resposta se perder depois das tentativas, o pagamento local fica `FAILED` e o cliente
+  não recebe aquele QR Code; a Saga trata como falha de pagamento.
+- A rota de simulação substitui o banco do cliente só em dev/hml; em produção ela responde 404.
