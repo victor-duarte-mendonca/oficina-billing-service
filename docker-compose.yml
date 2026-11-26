@@ -1,5 +1,5 @@
 # Billing Service local, com PostgreSQL próprio, SQS do LocalStack e o provedor de pagamento simulado (sem conta AWS
-# nem Mercado Pago).
+# nem Stripe).
 #   docker compose up --build
 #   Saúde: http://localhost:8083/q/health · OpenAPI: http://localhost:8083/q/openapi
 # A chave pública de TESTE do JWT é montada só para desenvolvimento; tokens de teste: src/test/.../TestTokens.java.

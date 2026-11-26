@@ -9,7 +9,7 @@
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>Oficina — Billing Service</name>
-    <description>Orçamentos, pagamentos Pix (Mercado Pago) e estornos da OS (Fase 4, spec 05)</description>
+    <description>Orçamentos, pagamentos Pix (Stripe) e estornos da OS (Fase 4, spec 05)</description>
 
     <properties>
         <compiler-plugin.version>3.13.0</compiler-plugin.version>
@@ -119,7 +119,7 @@
             <artifactId>quarkus-smallrye-jwt</artifactId>
         </dependency>
 
-        <!-- Timeout, retry e circuit breaker na chamada ao Mercado Pago (spec 05 §6) -->
+        <!-- Timeout, retry e circuit breaker na chamada à Stripe (spec 05 §6) -->
         <dependency>
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-smallrye-fault-tolerance</artifactId>

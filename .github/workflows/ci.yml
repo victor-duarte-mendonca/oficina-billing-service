@@ -72,7 +72,7 @@ jobs:
           severity: CRITICAL
           ignore-unfixed: true
 
-  # Spec 05 §7: nenhuma credencial (access token do Mercado Pago, segredo do webhook) no repositório, em todo o
+  # Spec 05 §7: nenhuma credencial (chave de API da Stripe, segredo do webhook) no repositório, em todo o
   # histórico. As chaves de TESTE do JWT em src/test/resources/test-keys são públicas por definição (.gitleaks.toml).
   secret-scan:
     name: secret-scan

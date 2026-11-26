@@ -150,7 +150,7 @@ class BillingApiTest {
         given().when().get("/q/health/ready").then().statusCode(200).body("status", equalTo("UP"));
         given().when().get("/q/metrics").then().statusCode(200)
             .body(containsString("billing_events_total{type=\"BudgetGenerated\"}"));
-        given().when().get("/q/openapi").then().statusCode(200).body(containsString("/webhooks/mercadopago"));
+        given().when().get("/q/openapi").then().statusCode(200).body(containsString("/webhooks/stripe"));
     }
 
     @Test

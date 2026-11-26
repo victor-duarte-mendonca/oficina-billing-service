@@ -1,5 +1,5 @@
 # Menor privilégio de rede: entra só o Traefik (e o kubelet, pelas probes); sai só DNS, o PostgreSQL próprio (RDS),
-# HTTPS (SQS, Mercado Pago e OTLP do New Relic), SMTP com TLS e o IMDS da EC2, de onde vêm as credenciais do LabRole
+# HTTPS (SQS, Stripe e OTLP do New Relic), SMTP com TLS e o IMDS da EC2, de onde vêm as credenciais do LabRole
 # (ADR 0022).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -23,7 +23,7 @@ class GatewayKeyFilterTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"/admin/budgets/OS-000001", "me/budgets/OS-000001", "/public/budgets/OS-000001/approve",
-        "/webhooks/mercadopago", "/qualquer"})
+        "/webhooks/stripe", "/qualquer"})
     void businessRoutesWithoutKey_shouldBeForbidden(String path) {
         ContainerRequestContext request = request(path, null);
 
@@ -45,7 +45,7 @@ class GatewayKeyFilterTest {
 
     @Test
     void theGatewayKey_shouldPass() {
-        ContainerRequestContext request = request("/webhooks/mercadopago", KEY);
+        ContainerRequestContext request = request("/webhooks/stripe", KEY);
 
         new GatewayKeyFilter(Optional.of(KEY)).filter(request);
 

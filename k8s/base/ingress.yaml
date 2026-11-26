@@ -40,7 +40,7 @@ spec:
                 name: oficina-billing
                 port:
                   name: http
-          - path: /webhooks/mercadopago
+          - path: /webhooks/stripe
             pathType: Exact
             backend:
               service:

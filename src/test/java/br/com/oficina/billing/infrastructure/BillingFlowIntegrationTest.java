@@ -42,7 +42,6 @@ import software.amazon.awssdk.services.sqs.model.Message;
 @QuarkusTestResource(LocalStackResource.class)
 class BillingFlowIntegrationTest {
 
-    private static final long TS = 1_704_908_010L;
 
     @Inject SqsClient sqs;
     @Inject BillingConfig config;
@@ -83,10 +82,9 @@ class BillingFlowIntegrationTest {
 
         String providerId = scenario.providerId(paymentId);
         gateway.simulate(providerId, ProviderStatus.APPROVED, "accredited");
-        given().contentType(ContentType.JSON).header("x-signature", WebhookSigner.header(providerId, "mp-1", TS))
-            .header("x-request-id", "mp-1").queryParam("data.id", providerId).queryParam("type", "payment")
-            .body("{\"type\":\"payment\",\"data\":{\"id\":\"" + providerId + "\"}}")
-            .when().post("/webhooks/mercadopago").then().statusCode(200);
+        String event = WebhookSigner.paymentIntentEvent("payment_intent.succeeded", providerId);
+        given().contentType(ContentType.JSON).header("Stripe-Signature", WebhookSigner.header(event)).body(event)
+            .when().post("/webhooks/stripe").then().statusCode(200);
         JsonNode approved = single("PaymentApproved");
         assertThat(approved.at("/payload/amount").asText()).isEqualTo("450.00");
         assertThat(approved.get("causationId").isNull()).isTrue();

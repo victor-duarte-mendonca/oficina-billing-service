@@ -2,7 +2,7 @@ package br.com.oficina.billing.infrastructure.configuration;
 
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort;
 import br.com.oficina.billing.infrastructure.configuration.BillingConfig.Payment.Provider;
-import br.com.oficina.billing.infrastructure.payment.MercadoPagoPaymentGateway;
+import br.com.oficina.billing.infrastructure.payment.StripePaymentGateway;
 import br.com.oficina.billing.infrastructure.payment.SimulatedPaymentGateway;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Disposes;
@@ -35,10 +35,10 @@ public class InfrastructureBeans {
     @Produces
     @ApplicationScoped
     PaymentGatewayPort paymentGateway(BillingConfig config, Instance<SimulatedPaymentGateway> simulated,
-                                      Instance<MercadoPagoPaymentGateway> mercadoPago) {
+                                      Instance<StripePaymentGateway> stripe) {
         Provider provider = config.payment().provider();
         LOG.infof("Provedor de pagamento: %s", provider);
-        return provider == Provider.MERCADOPAGO ? mercadoPago.get() : simulated.get();
+        return provider == Provider.STRIPE ? stripe.get() : simulated.get();
     }
 
     @Produces

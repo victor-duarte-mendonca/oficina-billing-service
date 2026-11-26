@@ -8,8 +8,8 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Provedor de pagamento (ADR 0021). Implementações: Mercado Pago (produção), simulado (dev/hml e testes). Trocar de
- * provedor — ou da Payments API para a Orders API do Mercado Pago — não toca o domínio.
+ * Provedor de pagamento (ADR 0023). Implementações: Stripe (Pix em modo de teste) e simulado (dev/hml e testes).
+ * Trocar de provedor não toca o domínio — foi o que permitiu sair do Mercado Pago (ADR 0021).
  */
 public interface PaymentGatewayPort {
 

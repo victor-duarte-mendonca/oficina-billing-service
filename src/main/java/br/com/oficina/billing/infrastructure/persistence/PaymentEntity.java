@@ -49,7 +49,7 @@ public class PaymentEntity {
     @Column(name = "idempotency_key", nullable = false, updatable = false)
     private UUID idempotencyKey;
 
-    @Column(name = "mp_payment_id")
+    @Column(name = "provider_payment_id")
     private String providerPaymentId;
 
     @Column(name = "qr_code")
