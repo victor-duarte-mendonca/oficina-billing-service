@@ -27,10 +27,12 @@ public class SimulatedPaymentGateway implements PaymentGatewayPort {
     private final Map<String, Charge> charges = new ConcurrentHashMap<>();
     private final Map<UUID, String> chargeByKey = new ConcurrentHashMap<>();
     private final Set<UUID> refundKeys = ConcurrentHashMap.newKeySet();
+    private final Map<String, RefundOutcome> refunds = new ConcurrentHashMap<>();
     private final AtomicLong sequence = new AtomicLong(1_000);
     private final AtomicInteger creationsToFail = new AtomicInteger();
     private volatile String refundRefusal;
     private volatile boolean unavailable;
+    private volatile boolean holdRefunds;
 
     @Override
     public PixCharge createPix(PixRequest request) {
@@ -57,7 +59,7 @@ public class SimulatedPaymentGateway implements PaymentGatewayPort {
     }
 
     @Override
-    public void refund(String providerPaymentId, Money amount, UUID idempotencyKey) {
+    public RefundOutcome refund(String providerPaymentId, Money amount, UUID idempotencyKey) {
         if (unavailable) {
             throw new PaymentGatewayException("provedor simulado indisponível", true);
         }
@@ -65,7 +67,7 @@ public class SimulatedPaymentGateway implements PaymentGatewayPort {
             throw new PaymentGatewayException(refundRefusal, false);
         }
         if (!refundKeys.add(idempotencyKey)) {
-            return;
+            return refunds.getOrDefault(providerPaymentId, RefundOutcome.SUCCEEDED);
         }
         Charge charge = charge(providerPaymentId);
         if (charge.status() != ProviderStatus.APPROVED || charge.refunded()) {
@@ -77,6 +79,27 @@ public class SimulatedPaymentGateway implements PaymentGatewayPort {
             throw new PaymentGatewayException("valor do estorno difere do pagamento", false);
         }
         charges.put(providerPaymentId, charge.withRefund());
+        RefundOutcome outcome = holdRefunds ? RefundOutcome.PENDING : RefundOutcome.SUCCEEDED;
+        refunds.put(providerPaymentId, outcome);
+        return outcome;
+    }
+
+    @Override
+    public Optional<RefundOutcome> findRefund(String providerPaymentId) {
+        if (unavailable) {
+            throw new PaymentGatewayException("provedor simulado indisponível", true);
+        }
+        return Optional.ofNullable(refunds.get(providerPaymentId));
+    }
+
+    /** Próximos estornos ficam pendentes no provedor (como o Pix real nos primeiros segundos). */
+    public void holdRefunds(boolean hold) {
+        holdRefunds = hold;
+    }
+
+    /** O provedor conclui (ou falha) o estorno pendente; o Billing só fica sabendo por webhook ou reconciliação. */
+    public void settleRefund(String providerPaymentId, RefundOutcome outcome) {
+        refunds.put(providerPaymentId, outcome);
     }
 
     /** O cliente "pagou" (ou o banco recusou, ou o Pix venceu). */
@@ -105,6 +128,7 @@ public class SimulatedPaymentGateway implements PaymentGatewayPort {
 
     public void reset() {
         creationsToFail.set(0);
+        holdRefunds = false;
         refundRefusal = null;
         unavailable = false;
     }

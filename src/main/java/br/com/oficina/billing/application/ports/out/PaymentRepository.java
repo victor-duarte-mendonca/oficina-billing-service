@@ -24,6 +24,9 @@ public interface PaymentRepository {
     /** Pedidos que ficaram sem resposta do provedor (pod caiu no meio da chamada). */
     List<Payment> findAwaitingProviderCreatedBefore(Instant createdBefore, int limit);
 
+    /** Estornos aceitos pelo provedor mas ainda sem desfecho: candidatos à reconciliação. */
+    List<Payment> findRefundPending(int limit);
+
     /**
      * @throws ActivePaymentConflictException se já houver outro pagamento ativo para o orçamento
      */

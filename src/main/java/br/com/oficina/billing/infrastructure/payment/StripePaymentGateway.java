@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import org.eclipse.microprofile.faulttolerance.exceptions.FaultToleranceException;
@@ -87,11 +88,20 @@ public class StripePaymentGateway implements PaymentGatewayPort {
     }
 
     @Override
-    public void refund(String providerPaymentId, Money amount, UUID idempotencyKey) {
+    public RefundOutcome refund(String providerPaymentId, Money amount, UUID idempotencyKey) {
         Map<String, String> form = new LinkedHashMap<>();
         form.put("payment_intent", validId(providerPaymentId));
         form.put("amount", Long.toString(cents(amount)));
-        guarded(() -> api.post("/v1/refunds", idempotencyKey, form));
+        JsonNode refund = guarded(() -> api.post("/v1/refunds", idempotencyKey, form));
+        return mapRefund(refund.path("status").asText(""));
+    }
+
+    /** O estorno mais recente do PaymentIntent (a Stripe lista do mais novo para o mais antigo). */
+    @Override
+    public Optional<RefundOutcome> findRefund(String providerPaymentId) {
+        JsonNode refunds = guarded(() -> api.get("/v1/refunds?limit=1&payment_intent=" + validId(providerPaymentId)));
+        JsonNode latest = refunds.path("data").path(0);
+        return latest.isMissingNode() ? Optional.empty() : Optional.of(mapRefund(latest.path("status").asText("")));
     }
 
     /**
@@ -103,6 +113,18 @@ public class StripePaymentGateway implements PaymentGatewayPort {
             case "succeeded" -> ProviderStatus.APPROVED;
             case "canceled", "requires_payment_method" -> ProviderStatus.EXPIRED;
             default -> ProviderStatus.PENDING;
+        };
+    }
+
+    /**
+     * Estados do estorno. O Pix nasce {@code pending} e conclui em segundos (observado no sandbox em 2026-11-26);
+     * {@code failed} e {@code canceled} são definitivos; estado desconhecido espera (nunca assume sucesso).
+     */
+    static RefundOutcome mapRefund(String status) {
+        return switch (status) {
+            case "succeeded" -> RefundOutcome.SUCCEEDED;
+            case "failed", "canceled" -> RefundOutcome.FAILED;
+            default -> RefundOutcome.PENDING;
         };
     }
 

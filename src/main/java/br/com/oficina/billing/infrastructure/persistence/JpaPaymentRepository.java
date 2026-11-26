@@ -17,6 +17,9 @@ import org.hibernate.exception.ConstraintViolationException;
 @ApplicationScoped
 public class JpaPaymentRepository implements PaymentRepository {
 
+    /** Limite superior para listar por situação sem filtrar por idade. */
+    private static final Instant FAR_FUTURE = Instant.parse("9999-01-01T00:00:00Z");
+
     static final String ACTIVE_PAYMENT_INDEX = "ux_payment_active_budget";
 
     private final EntityManager em;
@@ -57,6 +60,11 @@ public class JpaPaymentRepository implements PaymentRepository {
     @Override
     public List<Payment> findAwaitingProviderCreatedBefore(Instant createdBefore, int limit) {
         return byStatusCreatedBefore(PaymentStatus.REQUESTED, createdBefore, limit);
+    }
+
+    @Override
+    public List<Payment> findRefundPending(int limit) {
+        return byStatusCreatedBefore(PaymentStatus.REFUND_PENDING, FAR_FUTURE, limit);
     }
 
     @Override

@@ -5,6 +5,7 @@ import br.com.oficina.billing.application.ports.out.BillingMetricsPort;
 import br.com.oficina.billing.application.ports.out.InboxPort;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.PaymentGatewayException;
+import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.RefundOutcome;
 import br.com.oficina.billing.application.ports.out.PaymentRepository;
 import br.com.oficina.billing.application.ports.out.TransactionRunner;
 import br.com.oficina.billing.application.service.EventPublisher;
@@ -22,6 +23,8 @@ import java.util.UUID;
  * comando e abre outra tentativa (outra chave).
  */
 public final class RefundPaymentStrategy implements BillingCommandStrategy {
+
+    static final String REFUND_REFUSED = "estorno recusado pelo provedor";
 
     private final TransactionRunner transactions;
     private final InboxPort inbox;
@@ -82,16 +85,24 @@ public final class RefundPaymentStrategy implements BillingCommandStrategy {
 
     private void complete(InboundMessage command, Refund refund) {
         String failure = null;
+        RefundOutcome outcome = RefundOutcome.SUCCEEDED;
         try {
-            gateway.refund(refund.providerPaymentId(), refund.amount(), refund.idempotencyKey());
+            outcome = gateway.refund(refund.providerPaymentId(), refund.amount(), refund.idempotencyKey());
         } catch (PaymentGatewayException e) {
             metrics.gatewayFailure("refund");
             failure = e.isTransient() ? RequestPaymentStrategy.UNAVAILABLE : e.getMessage();
         }
+        if (outcome == RefundOutcome.FAILED) {
+            failure = REFUND_REFUSED;
+        }
         String reason = failure;
+        boolean settled = reason != null || outcome == RefundOutcome.SUCCEEDED;
         transactions.run(() -> {
             if (!inbox.markProcessed(command.messageId())) {
                 return;
+            }
+            if (!settled) {
+                return; // pendente no provedor: o webhook (refund.updated) ou a reconciliação concluem
             }
             Payment payment = payments.findById(refund.paymentId()).orElseThrow();
             if (reason == null) {
