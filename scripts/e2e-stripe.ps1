@@ -117,7 +117,15 @@ try {
             if ($LASTEXITCODE -eq 0) { $apiKey = ([string]$ssm).Trim() }
             else { $why = (($ssm | Out-String) -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
         }
-        $keyOk = (-not [string]::IsNullOrWhiteSpace($apiKey)) -and ($apiKey.StartsWith("rk_test_") -or $apiKey.StartsWith("sk_test_"))
+        $valid = { param($k) (-not [string]::IsNullOrWhiteSpace($k)) -and ($k.StartsWith("rk_test_") -or $k.StartsWith("sk_test_")) }
+        if (-not (& $valid $apiKey)) {
+            # Ultimo recurso: pedir a chave aqui, em prompt oculto (nada aparece na tela nem no historico).
+            Write-Host "`nNao achei a chave no ambiente nem no SSM. Copie a chave rk_test_... no Dashboard da Stripe," -ForegroundColor Yellow
+            Write-Host "cole abaixo (nao aparece nada ao colar) e tecle Enter." -ForegroundColor Yellow
+            $secure = Read-Host "Chave de API de teste" -AsSecureString
+            $apiKey = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)).Trim()
+        }
+        $keyOk = & $valid $apiKey
         Step "Chave de API de TESTE da Stripe obtida (env ou SSM)" $keyOk  $(if ($keyOk) { "(valor nao exibido)" } else { "- defina `$env:STRIPE_API_KEY (rk_test_...) ou ative a sessao AWS. $why" })
     }
 
