@@ -122,8 +122,11 @@ try {
     }
 
     # --- 1. segredo do webhook do `stripe listen` e override do compose ---------------------------------------
-    $secret = (stripe listen --print-secret 2>$null | Select-Object -Last 1).Trim()
-    Step "Segredo do webhook (stripe listen)" ($secret.StartsWith("whsec_")) "(valor nao exibido)"
+    $raw = (stripe listen --print-secret 2>&1 | Out-String)
+    $found = [regex]::Match($raw, "whsec_\w+")
+    $secret = if ($found.Success) { $found.Value } else { "" }
+    $hint = if ($found.Success) { "(valor nao exibido)" } else { "- rode `stripe login` e tente de novo. Saida do CLI: " + ($raw -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
+    Step "Segredo do webhook (stripe listen)" $found.Success $hint
     $env:STRIPE_API_KEY = $apiKey
     $env:STRIPE_WEBHOOK_SECRET = $secret
 
