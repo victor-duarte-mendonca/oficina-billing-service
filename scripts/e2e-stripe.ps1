@@ -109,7 +109,10 @@ try {
 
     $apiKey = ""
     if (-not $NoStripeKey) {
-        $apiKey = $env:STRIPE_API_KEY
+        $apiKey = $(if ($env:BILLING_STRIPE_API_KEY) { $env:BILLING_STRIPE_API_KEY } else { $env:STRIPE_API_KEY })
+        # O Stripe CLI usa STRIPE_API_KEY como a chave DELE: com a chave restrita do Billing ali, o `stripe listen` falha
+        # com "Permission denied". Por isso ela sai do ambiente e vai ao compose por outro nome.
+        $env:STRIPE_API_KEY = $null
         $why = ""
         if ([string]::IsNullOrWhiteSpace($apiKey)) {
             if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = "us-east-1" }
@@ -135,7 +138,7 @@ try {
     $secret = if ($found.Success) { $found.Value } else { "" }
     $hint = if ($found.Success) { "(valor nao exibido)" } else { "- rode `stripe login` e tente de novo. Saida do CLI: " + ($raw -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
     Step "Segredo do webhook (stripe listen)" $found.Success $hint
-    $env:STRIPE_API_KEY = $apiKey
+    $env:BILLING_STRIPE_API_KEY = $apiKey
     $env:STRIPE_WEBHOOK_SECRET = $secret
 
     $override = Join-Path $Tmp "override.yml"
@@ -145,7 +148,7 @@ services:
     environment:
       PAYMENT_PROVIDER: stripe
       PAYMENT_SIMULATION_ENABLED: "false"
-      STRIPE_API_KEY: `${STRIPE_API_KEY}
+      STRIPE_API_KEY: `${BILLING_STRIPE_API_KEY}
       STRIPE_WEBHOOK_SECRET: `${STRIPE_WEBHOOK_SECRET}
 "@ | Set-Content -Path $override -Encoding ASCII
 
@@ -250,7 +253,7 @@ catch {
 }
 finally {
     if ($ListenProcess -and -not $ListenProcess.HasExited) { Stop-Process -Id $ListenProcess.Id -Force }
-    $env:STRIPE_API_KEY = $null; $env:STRIPE_WEBHOOK_SECRET = $null
+    $env:BILLING_STRIPE_API_KEY = $null; $env:STRIPE_API_KEY = $null; $env:STRIPE_WEBHOOK_SECRET = $null
     if (-not $Keep) { docker compose -p $Project stop 2>&1 | Out-Null }
     Write-Host "`n=== Resumo ===" -ForegroundColor Cyan
     $Results | Format-Table -AutoSize -Wrap | Out-String | Write-Host
