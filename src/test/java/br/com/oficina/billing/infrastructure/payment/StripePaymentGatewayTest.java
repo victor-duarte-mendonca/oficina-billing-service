@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.PaymentGatewayException;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.PixRequest;
+import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.RefundOutcome;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.ProviderPayment;
 import br.com.oficina.billing.domain.model.PixCharge;
 import br.com.oficina.billing.domain.model.ProviderStatus;
@@ -171,12 +172,42 @@ class StripePaymentGatewayTest {
         UUID key = UUID.randomUUID();
         responseBody = "{\"id\": \"re_1\", \"status\": \"succeeded\"}";
 
-        gateway.refund("pi_55", Money.of("450.00"), key);
+        assertThat(gateway.refund("pi_55", Money.of("450.00"), key)).isEqualTo(RefundOutcome.SUCCEEDED);
 
         Recorded sent = requests.get(0);
         assertThat(sent.path()).isEqualTo("/v1/refunds");
         assertThat(sent.headers()).containsEntry("Idempotency-key", key.toString());
         assertThat(sent.form()).containsEntry("payment_intent", "pi_55").containsEntry("amount", "45000");
+    }
+
+    @Test
+    void pixRefund_startsPending_andTheOutcomeIsTranslated() {
+        responseBody = "{\"id\": \"pyr_1\", \"status\": \"pending\"}";
+        assertThat(gateway.refund("pi_55", Money.of("10.00"), UUID.randomUUID())).isEqualTo(RefundOutcome.PENDING);
+
+        assertThat(StripePaymentGateway.mapRefund("succeeded")).isEqualTo(RefundOutcome.SUCCEEDED);
+        assertThat(StripePaymentGateway.mapRefund("pending")).isEqualTo(RefundOutcome.PENDING);
+        assertThat(StripePaymentGateway.mapRefund("requires_action")).isEqualTo(RefundOutcome.PENDING);
+        assertThat(StripePaymentGateway.mapRefund("failed")).isEqualTo(RefundOutcome.FAILED);
+        assertThat(StripePaymentGateway.mapRefund("canceled")).isEqualTo(RefundOutcome.FAILED);
+        assertThat(StripePaymentGateway.mapRefund("")).isEqualTo(RefundOutcome.PENDING);
+    }
+
+    @Test
+    void findRefund_shouldReadTheLatestRefundOfThePaymentIntent() {
+        responseBody = "{\"data\": [{\"id\": \"pyr_2\", \"status\": \"failed\"}, {\"id\": \"pyr_1\", \"status\": \"succeeded\"}]}";
+
+        assertThat(gateway.findRefund("pi_55")).contains(RefundOutcome.FAILED);
+        assertThat(requests.get(0).method()).isEqualTo("GET");
+        assertThat(requests.get(0).path()).isEqualTo("/v1/refunds");
+        assertThat(requests.get(0).query()).contains("payment_intent=pi_55").contains("limit=1");
+    }
+
+    @Test
+    void findRefund_withoutAnyRefund_shouldBeEmpty() {
+        responseBody = "{\"data\": []}";
+
+        assertThat(gateway.findRefund("pi_55")).isEmpty();
     }
 
     @Test
@@ -240,7 +271,8 @@ class StripePaymentGatewayTest {
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Map<String, String> headers = new HashMap<>();
         exchange.getRequestHeaders().forEach((name, values) -> headers.put(name, values.get(0)));
-        requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), headers, body));
+        requests.add(new Recorded(exchange.getRequestMethod(), exchange.getRequestURI().getPath(), headers, body,
+            String.valueOf(exchange.getRequestURI().getQuery())));
         byte[] bytes = responseBody.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);
         try (OutputStream out = exchange.getResponseBody()) {
@@ -248,7 +280,7 @@ class StripePaymentGatewayTest {
         }
     }
 
-    private record Recorded(String method, String path, Map<String, String> headers, String body) {
+    private record Recorded(String method, String path, Map<String, String> headers, String body, String query) {
 
         Map<String, String> form() {
             Map<String, String> fields = new LinkedHashMap<>();

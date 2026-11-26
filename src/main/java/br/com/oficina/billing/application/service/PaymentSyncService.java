@@ -7,11 +7,13 @@ import br.com.oficina.billing.application.ports.out.BudgetRepository;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.PaymentGatewayException;
 import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.ProviderPayment;
+import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.RefundOutcome;
 import br.com.oficina.billing.application.ports.out.PaymentRepository;
 import br.com.oficina.billing.application.ports.out.PaymentRepository.NoticeSource;
 import br.com.oficina.billing.application.ports.out.TransactionRunner;
 import br.com.oficina.billing.domain.model.Budget;
 import br.com.oficina.billing.domain.model.Payment;
+import br.com.oficina.billing.domain.model.PaymentStatus;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -27,6 +29,7 @@ public final class PaymentSyncService implements PaymentSyncUseCase, BillingMain
 
     private static final int BATCH = 50;
     private static final String NO_PROVIDER_ANSWER = "sem resposta do provedor de pagamento";
+    private static final String REFUND_REFUSED = "estorno recusado pelo provedor";
 
     private final TransactionRunner transactions;
     private final BudgetRepository budgets;
@@ -52,9 +55,12 @@ public final class PaymentSyncService implements PaymentSyncUseCase, BillingMain
 
     @Override
     public SyncResult sync(String providerPaymentId, NoticeSource source) {
-        boolean known = transactions.inTransaction(() -> payments.findByProviderId(providerPaymentId).isPresent());
-        if (!known) {
+        Optional<Payment> found = transactions.inTransaction(() -> payments.findByProviderId(providerPaymentId));
+        if (found.isEmpty()) {
             return SyncResult.UNKNOWN;
+        }
+        if (found.get().status() == PaymentStatus.REFUND_PENDING) {
+            return syncRefund(providerPaymentId, source);
         }
         ProviderPayment remote = consult(providerPaymentId);
         return transactions.inTransaction(() -> {
@@ -62,6 +68,28 @@ public final class PaymentSyncService implements PaymentSyncUseCase, BillingMain
             payments.recordProviderNotice(payment.id(), source, remote.status().name(), clock.instant());
             return apply(payment, payment.applyProviderStatus(remote.status(), remote.detail()));
         });
+    }
+
+    /** Estorno aceito mas sem desfecho: a situação vem da consulta ao estorno, não do PaymentIntent (que segue pago). */
+    private SyncResult syncRefund(String providerPaymentId, NoticeSource source) {
+        Optional<RefundOutcome> outcome = consultRefund(providerPaymentId);
+        return transactions.inTransaction(() -> {
+            Payment payment = payments.findByProviderId(providerPaymentId).orElseThrow();
+            outcome.ifPresent(found -> payments.recordProviderNotice(payment.id(), source, "REFUND_" + found.name(),
+                clock.instant()));
+            return apply(payment, outcome.map(found -> applyRefund(payment, found)).orElse(false));
+        });
+    }
+
+    private static boolean applyRefund(Payment payment, RefundOutcome outcome) {
+        switch (outcome) {
+            case SUCCEEDED -> payment.refunded();
+            case FAILED -> payment.refundFailed(REFUND_REFUSED);
+            case PENDING -> {
+                return false;
+            }
+        }
+        return payment.status() != PaymentStatus.REFUND_PENDING;
     }
 
     @Override
@@ -89,7 +117,19 @@ public final class PaymentSyncService implements PaymentSyncUseCase, BillingMain
         List<Payment> pending = transactions.inTransaction(
             () -> payments.findPendingCreatedBefore(now.minus(timing.reconcileAfter()), BATCH));
         int changed = (int) pending.stream().filter(payment -> reconcile(payment.providerPaymentId(), now)).count();
-        return changed + closeUnanswered(now);
+        int refunds = reconcileRefunds();
+        return changed + refunds + closeUnanswered(now);
+    }
+
+    private int reconcileRefunds() {
+        List<Payment> waiting = transactions.inTransaction(() -> payments.findRefundPending(BATCH));
+        return (int) waiting.stream().filter(payment -> {
+            try {
+                return syncRefund(payment.providerPaymentId(), NoticeSource.POLL) == SyncResult.UPDATED;
+            } catch (PaymentGatewayException e) {
+                return false;
+            }
+        }).count();
     }
 
     private boolean reconcile(String providerPaymentId, Instant now) {
@@ -120,6 +160,15 @@ public final class PaymentSyncService implements PaymentSyncUseCase, BillingMain
             });
             return stuck.size();
         });
+    }
+
+    private Optional<RefundOutcome> consultRefund(String providerPaymentId) {
+        try {
+            return gateway.findRefund(providerPaymentId);
+        } catch (PaymentGatewayException e) {
+            metrics.gatewayFailure("find_refund");
+            throw e;
+        }
     }
 
     private ProviderPayment consult(String providerPaymentId) {

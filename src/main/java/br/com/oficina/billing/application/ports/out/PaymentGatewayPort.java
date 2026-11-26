@@ -20,7 +20,16 @@ public interface PaymentGatewayPort {
     ProviderPayment find(String providerPaymentId);
 
     /** Estorno total. A mesma {@code idempotencyKey} nunca estorna duas vezes. */
-    void refund(String providerPaymentId, Money amount, UUID idempotencyKey);
+    RefundOutcome refund(String providerPaymentId, Money amount, UUID idempotencyKey);
+
+    /**
+     * Situação do estorno mais recente do pagamento, consultada no provedor (fonte da verdade; o corpo do webhook nunca
+     * é usado). Vazio se o provedor não conhece estorno algum.
+     */
+    Optional<RefundOutcome> findRefund(String providerPaymentId);
+
+    /** O estorno pode ficar pendente no provedor (Pix leva alguns segundos) e falhar depois. */
+    enum RefundOutcome { SUCCEEDED, PENDING, FAILED }
 
     record PixRequest(UUID idempotencyKey, UUID paymentId, Money amount, String description,
                       Optional<String> payerEmail, Instant expiresAt) {

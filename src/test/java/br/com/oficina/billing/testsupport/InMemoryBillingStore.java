@@ -119,6 +119,11 @@ public final class InMemoryBillingStore implements OutboxPort, InboxPort, Transa
     }
 
     @Override
+    public List<Payment> findRefundPending(int limit) {
+        return byStatus(PaymentStatus.REFUND_PENDING, java.time.Instant.parse("9999-01-01T00:00:00Z"), limit);
+    }
+
+    @Override
     public void save(Payment payment) {
         Payment.Snapshot s = payment.snapshot();
         Payment.Snapshot stored = payments.get(s.id());

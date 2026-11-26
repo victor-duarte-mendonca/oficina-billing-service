@@ -10,6 +10,7 @@ import br.com.oficina.billing.application.messaging.InvalidMessageException;
 import br.com.oficina.billing.application.messaging.MessageKind;
 import br.com.oficina.billing.application.messaging.OutboundMessage;
 import br.com.oficina.billing.application.ports.in.PaymentSyncUseCase.SyncResult;
+import br.com.oficina.billing.application.ports.out.PaymentGatewayPort.RefundOutcome;
 import br.com.oficina.billing.application.ports.out.PaymentRepository.NoticeSource;
 import br.com.oficina.billing.application.service.BillingCommandHandler;
 import br.com.oficina.billing.application.service.BudgetService;
@@ -394,6 +395,48 @@ class BillingApplicationTest {
 
             assertThat(store.lastMessage().type()).isEqualTo("PaymentRefunded");
             assertThat(gateway.isRefunded(providerId(paymentId))).isTrue();
+        }
+
+        @Test
+        void pendingRefund_shouldWait_andTheProviderNoticeConcludesIt() {
+            String paymentId = paidPix();
+            gateway.holdRefunds(true);
+
+            handler.handle(Commands.refundPayment(sagaId, WORK_ORDER, paymentId));
+
+            assertThat(store.outboxTypes()).doesNotContain("PaymentRefunded", "PaymentRefundFailed");
+            assertThat(sync.sync(providerId(paymentId), NoticeSource.WEBHOOK)).isEqualTo(SyncResult.UNCHANGED);
+
+            gateway.settleRefund(providerId(paymentId), RefundOutcome.SUCCEEDED);
+            assertThat(sync.sync(providerId(paymentId), NoticeSource.WEBHOOK)).isEqualTo(SyncResult.UPDATED);
+            assertThat(store.lastMessage().type()).isEqualTo("PaymentRefunded");
+            assertThat(sync.sync(providerId(paymentId), NoticeSource.WEBHOOK)).isEqualTo(SyncResult.UNCHANGED);
+        }
+
+        @Test
+        void pendingRefundThatFails_shouldBeReportedToTheSaga() {
+            String paymentId = paidPix();
+            gateway.holdRefunds(true);
+            handler.handle(Commands.refundPayment(sagaId, WORK_ORDER, paymentId));
+
+            gateway.settleRefund(providerId(paymentId), RefundOutcome.FAILED);
+
+            assertThat(sync.sync(providerId(paymentId), NoticeSource.WEBHOOK)).isEqualTo(SyncResult.UPDATED);
+            assertThat(store.lastMessage().type()).isEqualTo("PaymentRefundFailed");
+            assertThat(store.lastMessage().payload()).containsEntry("detail", "estorno recusado pelo provedor");
+        }
+
+        @Test
+        void pendingRefund_shouldBeConcludedByTheReconciliationWhenTheWebhookIsLost() {
+            String paymentId = paidPix();
+            gateway.holdRefunds(true);
+            handler.handle(Commands.refundPayment(sagaId, WORK_ORDER, paymentId));
+            assertThat(sync.reconcilePayments()).isZero();
+
+            gateway.settleRefund(providerId(paymentId), RefundOutcome.SUCCEEDED);
+
+            assertThat(sync.reconcilePayments()).isEqualTo(1);
+            assertThat(store.lastMessage().type()).isEqualTo("PaymentRefunded");
         }
 
         @Test

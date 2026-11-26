@@ -179,3 +179,15 @@ todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). O depl
 A URL do endpoint de webhook muda a cada sessão do Academy: o deploy a atualiza (`POST /v1/webhook_endpoints/{id}`), o
 `whsec_` não muda. O QR do Pix vem como copia e cola (`qrCode`) e página hospedada (`ticketUrl`); a Stripe não devolve
 base64, então `qrCodeBase64` é nulo. Decisão: [ADR 0023](https://github.com/victor-duarte-mendonca/oficina-app/blob/homolog/docs/adr/0023-pagamento-stripe-atras-de-porta.md).
+
+### Fluxo completo local com a Stripe de verdade
+
+`scripts/e2e-stripe.ps1` (PowerShell) sobe o Billing com `PAYMENT_PROVIDER=stripe`, encaminha os eventos com
+`stripe listen` e injeta os comandos da Saga na fila: `GenerateBudget` → aprovação pelo link → `RequestPayment` (Pix) →
+**você paga na página "Simulate scan"** → webhook `payment_intent.succeeded` → `RefundPayment` → estorno concluído por
+webhook ou reconciliação. Precisa do Docker, do Stripe CLI logado e da chave de teste (`$env:STRIPE_API_KEY` ou SSM
+`/oficina/<env>/stripe_api_key`). `-NoStripeKey` faz um teste a seco sem chave (para em `PaymentRequestFailed`).
+
+**Estorno de Pix:** nasce `pending` e conclui em segundos. O Billing mantém `REFUND_PENDING` e só responde à Saga quando a
+Stripe informa o desfecho (`refund.updated` ou a reconciliação de 60 s, que consulta `GET /v1/refunds`); estorno que
+falha vira `PaymentRefundFailed`.
