@@ -109,7 +109,10 @@ try {
 
     $apiKey = ""
     if (-not $NoStripeKey) {
-        $apiKey = $env:STRIPE_API_KEY
+        $apiKey = $(if ($env:BILLING_STRIPE_API_KEY) { $env:BILLING_STRIPE_API_KEY } else { $env:STRIPE_API_KEY })
+        # O Stripe CLI usa STRIPE_API_KEY como a chave DELE: com a chave restrita do Billing ali, o `stripe listen` falha
+        # com "Permission denied". Por isso ela sai do ambiente e vai ao compose por outro nome.
+        $env:STRIPE_API_KEY = $null
         $why = ""
         if ([string]::IsNullOrWhiteSpace($apiKey)) {
             if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = "us-east-1" }
@@ -117,14 +120,25 @@ try {
             if ($LASTEXITCODE -eq 0) { $apiKey = ([string]$ssm).Trim() }
             else { $why = (($ssm | Out-String) -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
         }
-        $keyOk = (-not [string]::IsNullOrWhiteSpace($apiKey)) -and ($apiKey.StartsWith("rk_test_") -or $apiKey.StartsWith("sk_test_"))
+        $valid = { param($k) (-not [string]::IsNullOrWhiteSpace($k)) -and ($k.StartsWith("rk_test_") -or $k.StartsWith("sk_test_")) }
+        if (-not (& $valid $apiKey)) {
+            # Ultimo recurso: pedir a chave aqui, em prompt oculto (nada aparece na tela nem no historico).
+            Write-Host "`nNao achei a chave no ambiente nem no SSM. Copie a chave rk_test_... no Dashboard da Stripe," -ForegroundColor Yellow
+            Write-Host "cole abaixo (nao aparece nada ao colar) e tecle Enter." -ForegroundColor Yellow
+            $secure = Read-Host "Chave de API de teste" -AsSecureString
+            $apiKey = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)).Trim()
+        }
+        $keyOk = & $valid $apiKey
         Step "Chave de API de TESTE da Stripe obtida (env ou SSM)" $keyOk  $(if ($keyOk) { "(valor nao exibido)" } else { "- defina `$env:STRIPE_API_KEY (rk_test_...) ou ative a sessao AWS. $why" })
     }
 
     # --- 1. segredo do webhook do `stripe listen` e override do compose ---------------------------------------
-    $secret = (stripe listen --print-secret 2>$null | Select-Object -Last 1).Trim()
-    Step "Segredo do webhook (stripe listen)" ($secret.StartsWith("whsec_")) "(valor nao exibido)"
-    $env:STRIPE_API_KEY = $apiKey
+    $raw = (stripe listen --print-secret 2>&1 | Out-String)
+    $found = [regex]::Match($raw, "whsec_\w+")
+    $secret = if ($found.Success) { $found.Value } else { "" }
+    $hint = if ($found.Success) { "(valor nao exibido)" } else { "- rode `stripe login` e tente de novo. Saida do CLI: " + ($raw -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
+    Step "Segredo do webhook (stripe listen)" $found.Success $hint
+    $env:BILLING_STRIPE_API_KEY = $apiKey
     $env:STRIPE_WEBHOOK_SECRET = $secret
 
     $override = Join-Path $Tmp "override.yml"
@@ -134,7 +148,7 @@ services:
     environment:
       PAYMENT_PROVIDER: stripe
       PAYMENT_SIMULATION_ENABLED: "false"
-      STRIPE_API_KEY: `${STRIPE_API_KEY}
+      STRIPE_API_KEY: `${BILLING_STRIPE_API_KEY}
       STRIPE_WEBHOOK_SECRET: `${STRIPE_WEBHOOK_SECRET}
 "@ | Set-Content -Path $override -Encoding ASCII
 
@@ -177,14 +191,21 @@ services:
     # --- 4. aprovacao pelo link do e-mail (codigo vem do log do mailer em modo mock) ------------------------------
     $token = Wait-Until {
         # O log persiste entre execucoes: vale o e-mail mais recente que cita a OS desta execucao.
-        $lines = @(docker logs "$Project-billing-1" 2>&1 | Where-Object { $_ -match $orderNumber -and $_ -match "autoriza" })
+        # Tolerante a codificacao do console (acentos podem chegar como 2-4 caracteres) e ao JSON do log.
+        $lines = @(docker logs "$Project-billing-1" 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -match $orderNumber -and $_ -match "autoriza" })
         if ($lines.Count -gt 0) {
-            $m = [regex]::Match([string]$lines[$lines.Count - 1], "C.digo de autoriza..o: ([A-Za-z0-9_-]+)")
+            $m = [regex]::Match($lines[$lines.Count - 1], "C.{1,3}digo de autoriza.{1,6}o: ([A-Za-z0-9_-]+)")
             if ($m.Success) { $m.Groups[1].Value } else { $null }
         }
         else { $null }
     } 30 2
-    Step "Codigo de autorizacao lido do e-mail (log do mailer mock)" ([bool]$token) "(valor nao exibido)"
+    $sample = ""
+    if (-not $token) {
+        $mailLines = @(docker logs "$Project-billing-1" 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -match "autoriza|mail|Mail" } | Select-Object -Last 3)
+        $sample = "- amostra do log (codigo mascarado): " + (($mailLines -join " | ") -replace "([Aa]utoriza.{1,6}o: )\S+", '$1***')
+        if ($sample.Length -gt 700) { $sample = $sample.Substring(0, 700) }
+    }
+    Step "Codigo de autorizacao lido do e-mail (log do mailer mock)" ([bool]$token) $(if ($token) { "(valor nao exibido)" } else { $sample })
     $approveBody = @{ token = $token } | ConvertTo-Json -Compress
     $approval = Invoke-RestMethod -Method Post -ErrorAction Stop -Uri "http://localhost:$Port/public/budgets/$orderNumber/approve" `
         -ContentType "application/json" -Body $approveBody
@@ -232,7 +253,7 @@ catch {
 }
 finally {
     if ($ListenProcess -and -not $ListenProcess.HasExited) { Stop-Process -Id $ListenProcess.Id -Force }
-    $env:STRIPE_API_KEY = $null; $env:STRIPE_WEBHOOK_SECRET = $null
+    $env:BILLING_STRIPE_API_KEY = $null; $env:STRIPE_API_KEY = $null; $env:STRIPE_WEBHOOK_SECRET = $null
     if (-not $Keep) { docker compose -p $Project stop 2>&1 | Out-Null }
     Write-Host "`n=== Resumo ===" -ForegroundColor Cyan
     $Results | Format-Table -AutoSize -Wrap | Out-String | Write-Host
