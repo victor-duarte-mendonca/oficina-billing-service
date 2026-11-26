@@ -110,11 +110,15 @@ try {
     $apiKey = ""
     if (-not $NoStripeKey) {
         $apiKey = $env:STRIPE_API_KEY
+        $why = ""
         if ([string]::IsNullOrWhiteSpace($apiKey)) {
-            $apiKey = (aws ssm get-parameter --name "/oficina/$SsmEnv/stripe_api_key" --with-decryption --query Parameter.Value --output text 2>$null)
+            if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = "us-east-1" }
+            $ssm = aws ssm get-parameter --name "/oficina/$SsmEnv/stripe_api_key" --with-decryption --query Parameter.Value --output text 2>&1
+            if ($LASTEXITCODE -eq 0) { $apiKey = ([string]$ssm).Trim() }
+            else { $why = (($ssm | Out-String) -replace "(sk|rk)_(test|live)_\w+", "***").Trim() }
         }
         $keyOk = (-not [string]::IsNullOrWhiteSpace($apiKey)) -and ($apiKey.StartsWith("rk_test_") -or $apiKey.StartsWith("sk_test_"))
-        Step "Chave de API de TESTE da Stripe obtida (env ou SSM)" $keyOk "(valor nao exibido)"
+        Step "Chave de API de TESTE da Stripe obtida (env ou SSM)" $keyOk  $(if ($keyOk) { "(valor nao exibido)" } else { "- defina `$env:STRIPE_API_KEY (rk_test_...) ou ative a sessao AWS. $why" })
     }
 
     # --- 1. segredo do webhook do `stripe listen` e override do compose ---------------------------------------
