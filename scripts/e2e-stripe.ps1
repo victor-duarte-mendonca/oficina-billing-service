@@ -188,14 +188,21 @@ services:
     # --- 4. aprovacao pelo link do e-mail (codigo vem do log do mailer em modo mock) ------------------------------
     $token = Wait-Until {
         # O log persiste entre execucoes: vale o e-mail mais recente que cita a OS desta execucao.
-        $lines = @(docker logs "$Project-billing-1" 2>&1 | Where-Object { $_ -match $orderNumber -and $_ -match "autoriza" })
+        # Tolerante a codificacao do console (acentos podem chegar como 2-4 caracteres) e ao JSON do log.
+        $lines = @(docker logs "$Project-billing-1" 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -match $orderNumber -and $_ -match "autoriza" })
         if ($lines.Count -gt 0) {
-            $m = [regex]::Match([string]$lines[$lines.Count - 1], "C.digo de autoriza..o: ([A-Za-z0-9_-]+)")
+            $m = [regex]::Match($lines[$lines.Count - 1], "C.{1,3}digo de autoriza.{1,6}o: ([A-Za-z0-9_-]+)")
             if ($m.Success) { $m.Groups[1].Value } else { $null }
         }
         else { $null }
     } 30 2
-    Step "Codigo de autorizacao lido do e-mail (log do mailer mock)" ([bool]$token) "(valor nao exibido)"
+    $sample = ""
+    if (-not $token) {
+        $mailLines = @(docker logs "$Project-billing-1" 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_ -match "autoriza|mail|Mail" } | Select-Object -Last 3)
+        $sample = "- amostra do log (codigo mascarado): " + (($mailLines -join " | ") -replace "([Aa]utoriza.{1,6}o: )\S+", '$1***')
+        if ($sample.Length -gt 700) { $sample = $sample.Substring(0, 700) }
+    }
+    Step "Codigo de autorizacao lido do e-mail (log do mailer mock)" ([bool]$token) $(if ($token) { "(valor nao exibido)" } else { $sample })
     $approveBody = @{ token = $token } | ConvertTo-Json -Compress
     $approval = Invoke-RestMethod -Method Post -ErrorAction Stop -Uri "http://localhost:$Port/public/budgets/$orderNumber/approve" `
         -ContentType "application/json" -Body $approveBody
