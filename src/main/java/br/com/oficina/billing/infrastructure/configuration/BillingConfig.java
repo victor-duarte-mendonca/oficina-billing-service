@@ -7,8 +7,8 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * Configuração de infraestrutura ({@code app.*}). URLs de filas vêm do contrato SSM da spec 12; o access token e o
- * segredo do webhook do Mercado Pago vêm do SSM Parameter Store (SecureString) como variáveis do pod — nunca do
+ * Configuração de infraestrutura ({@code app.*}). URLs de filas vêm do contrato SSM da spec 12; a chave de API e o
+ * segredo do webhook da Stripe vêm do SSM Parameter Store (SecureString) como variáveis do pod — nunca do
  * repositório.
  */
 @ConfigMapping(prefix = "app")
@@ -68,11 +68,11 @@ public interface BillingConfig {
     }
 
     interface Payment {
-        /** {@code simulated} (dev/hml/testes) ou {@code mercadopago}. */
+        /** {@code simulated} (dev/hml/testes) ou {@code stripe}. */
         @WithDefault("simulated")
         Provider provider();
 
-        /** Validade do Pix (o Mercado Pago aceita de 30 min a 30 dias). */
+        /** Validade do Pix (a Stripe aceita de 60 s a 14 dias). */
         @WithDefault("PT30M")
         Duration pixTtl();
 
@@ -88,22 +88,22 @@ public interface BillingConfig {
         @WithDefault("false")
         boolean simulationEnabled();
 
-        MercadoPago mercadopago();
+        Stripe stripe();
 
-        enum Provider { SIMULATED, MERCADOPAGO }
+        enum Provider { SIMULATED, STRIPE }
 
-        interface MercadoPago {
-            @WithDefault("https://api.mercadopago.com")
+        interface Stripe {
+            @WithDefault("https://api.stripe.com")
             URI baseUrl();
 
-            /** Access token de <b>teste</b> (usuário). Obrigatório com o provedor {@code mercadopago}. */
-            Optional<String> accessToken();
+            /** Chave de API de <b>teste</b> restrita (`rk_test_…`). Obrigatória com o provedor {@code stripe}. */
+            Optional<String> apiKey();
 
-            /** Segredo da assinatura do webhook ({@code x-signature}). */
+            /** Segredo do endpoint de webhook (`whsec_…`) usado para verificar {@code Stripe-Signature}. */
             Optional<String> webhookSecret();
 
-            /** URL pública do webhook informada em cada pagamento (rota do API Gateway). */
-            Optional<String> notificationUrl();
+            /** Versão da API fixada em {@code Stripe-Version}; vazio usa a padrão da conta (S7). */
+            Optional<String> apiVersion();
 
             /** O Pix exige e-mail do pagador; clientes sem e-mail usam este. */
             @WithDefault("cliente-sem-email@oficina.local")
@@ -114,6 +114,10 @@ public interface BillingConfig {
 
             @WithDefault("PT10S")
             Duration readTimeout();
+
+            /** Diferença máxima entre o relógio e o {@code t} da assinatura (anti-<i>replay</i>). */
+            @WithDefault("PT5M")
+            Duration webhookTolerance();
         }
     }
 }

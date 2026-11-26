@@ -18,7 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * Provedor simulado em memória, com o mesmo comportamento observável do Mercado Pago: idempotência por chave, Pix
  * pendente até alguém "pagar" ({@link #simulate}), estorno só de pagamento aprovado. Serve aos testes (determinístico)
  * e a dev/hml, onde a rota {@code /admin/payments/{id}/simulate} substitui o app do banco (spec 05 §4, V4).
- * Nunca é usado com {@code app.payment.provider=mercadopago}.
+ * Nunca é usado com {@code app.payment.provider=stripe}.
  */
 @ApplicationScoped
 @Typed(SimulatedPaymentGateway.class)

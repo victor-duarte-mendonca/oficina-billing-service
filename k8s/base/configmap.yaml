@@ -9,10 +9,10 @@ data:
   JWT_ISSUER: "oficina-api"
   AWS_REGION: "us-east-1"
   # Banco (DB_HOST, DB_NAME, DB_USERNAME, DB_PASSWORD), filas (SQS_BILLING_COMMANDS_URL, SQS_OS_REPLIES_URL),
-  # APP_GATEWAY_KEY, MP_ACCESS_TOKEN e MP_WEBHOOK_SECRET vêm do SSM no deploy, no Secret oficina-billing-secrets.
+  # APP_GATEWAY_KEY, STRIPE_API_KEY e STRIPE_WEBHOOK_SECRET vêm do SSM no deploy, no Secret oficina-billing-secrets.
   # Mensageria desligada até as filas existirem (spec 12): o deploy liga quando os parâmetros SSM estão publicados.
   APP_MESSAGING_ENABLED: "false"
-  # Provedor simulado até o usuário fornecer as credenciais de teste do Mercado Pago; a rota de simulação só em hml.
+  # Provedor simulado até o usuário fornecer as chave de teste da Stripe no ambiente; a rota de simulação só em hml.
   PAYMENT_PROVIDER: "simulated"
   PAYMENT_SIMULATION_ENABLED: "false"
   PAYMENT_PIX_TTL: "PT30M"

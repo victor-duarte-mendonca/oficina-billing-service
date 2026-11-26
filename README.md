@@ -1,7 +1,7 @@
 # Oficina — Billing Service
 
 Microsserviço de **orçamento e pagamento** da oficina (Tech Challenge FIAP, Fase 4). Gera o orçamento e o envia ao
-cliente, registra a decisão, cobra por **Pix (Mercado Pago)**, confirma o pagamento e estorna quando a Saga pede.
+cliente, registra a decisão, cobra por **Pix (Stripe, modo de teste)**, confirma o pagamento e estorna quando a Saga pede.
 Quem orquestra é o **OS Service**; este serviço só responde aos comandos e publica os fatos.
 
 | | |
@@ -9,7 +9,7 @@ Quem orquestra é o **OS Service**; este serviço só responde aos comandos e pu
 | Especificação | [`specs/fase4/05-billing-service-mercado-pago.md`](https://github.com/victor-duarte-mendonca/oficina-app/blob/homolog/specs/fase4/05-billing-service-mercado-pago.md) (no `oficina-app`) |
 | Banco | **PostgreSQL** próprio (Flyway `V1__baseline.sql`) |
 | Mensageria | SQS FIFO: consome `billing-commands`, publica em `os-saga-replies` |
-| Pagamento | `PaymentGatewayPort` com dois adapters: **Mercado Pago** (Payments API) e **simulado** (dev/hml/testes) |
+| Pagamento | `PaymentGatewayPort` com dois adapters: **Stripe** (PaymentIntent, Pix em BRL) e **simulado** (dev/hml/testes) |
 | Stack | Java 21, Quarkus 3.15.7, Hibernate ORM, SmallRye Fault Tolerance, AWS SDK v2, hexagonal |
 | Outros repositórios | [`oficina-app`](https://github.com/victor-duarte-mendonca/oficina-app) (OS + Saga), [`oficina-execution-service`](https://github.com/victor-duarte-mendonca/oficina-execution-service), [`oficina-infra-k8s`](https://github.com/victor-duarte-mendonca/oficina-infra-k8s), [`oficina-infra-database`](https://github.com/victor-duarte-mendonca/oficina-infra-database), [`oficina-auth-lambda`](https://github.com/victor-duarte-mendonca/oficina-auth-lambda) |
 
@@ -28,7 +28,7 @@ flowchart LR
   BI --> DB[(PostgreSQL<br/>budget · payment · inbox · outbox)]
   BI -- "Budget* · Payment*" --> Q2[(SQS FIFO<br/>os-saga-replies)]
   Q2 --> OS
-  BI <-- "Pix · consulta · estorno" --> MP[Mercado Pago]
+  BI <-- "Pix · consulta · estorno" --> MP[Stripe]
   MP -- "webhook" --> GW[API Gateway] --> BI
   C[Cliente] -- "/public/budgets · /me/budgets" --> GW
 ```
@@ -66,34 +66,22 @@ Tabelas: `budget`, `budget_line`, `payment`, `payment_event` (o que o provedor i
 
 ```
 transação 1: pagamento REQUESTED + chave de idempotência
-fora de transação: POST /v1/payments (X-Idempotency-Key) — retry e circuit breaker no adapter
+fora de transação: POST /v1/payment_intents (Idempotency-Key) — retry e circuit breaker no adapter
 transação 2: PENDING (QR Code) ou FAILED + resposta no outbox + comando marcado no inbox
 ```
 
 Se o pod cair entre os passos, a reentrega encontra o pagamento `REQUESTED` e repete a chamada com a **mesma** chave: o
 provedor devolve a mesma cobrança. Pedido sem resposta por 5 min é encerrado como falha pela reconciliação.
 
-**Webhook (`POST /webhooks/mercadopago`)**: corpo ≤ 16 KB → assinatura `x-signature` (HMAC-SHA256) → do corpo só o
-`data.id` → **consulta** `GET /v1/payments/{id}` → transição idempotente. Assinatura inválida: 401 e
+**Webhook (`POST /webhooks/stripe`)**: corpo ≤ 64 KB → `Stripe-Signature` (HMAC-SHA256 sobre `t.corpo`, tolerância 5 min)
+→ do evento só o id do PaymentIntent → **consulta** `GET /v1/payment_intents/{id}` → transição idempotente. Assinatura inválida: 401 e
 `billing_webhook_invalid_signature_total`. Pagamento desconhecido: 200 (o provedor pararia de reenviar só com 2xx).
-Com o Mercado Pago real o segredo é obrigatório (sem segredo, toda notificação é recusada).
+Com a Stripe real o segredo é obrigatório (sem segredo, toda notificação é recusada).
 
-**Resiliência**: timeouts 3 s (conexão) e 10 s (leitura); retry com backoff só em falha transitória (rede, 5xx, 429),
-sempre com a mesma chave; circuit breaker (SmallRye Fault Tolerance); com o provedor fora, a Saga recebe
+**Resiliência**: timeouts 3 s (conexão) e 10 s (leitura); retry com backoff só em falha transitória (rede, 5xx, 429, 409),
+sempre com a mesma `Idempotency-Key`; circuit breaker (SmallRye Fault Tolerance); com o provedor fora, a Saga recebe
 `PaymentRequestFailed`.
 
-### O que depende das credenciais de teste do Mercado Pago (usuário)
-
-O adapter segue a documentação, mas **não foi exercitado contra o sandbox**. Com as credenciais:
-
-1. `PAYMENT_PROVIDER=mercadopago`, `MP_ACCESS_TOKEN` e `MP_WEBHOOK_SECRET` (SSM, SecureString), `MP_NOTIFICATION_URL`
-   = rota do gateway.
-2. Confirmar: manifesto da assinatura (V3 da spec 05), nome `notification_url` (V2), situação de Pix vencido (V5),
-   como aprovar um Pix de teste (V4 — a doc da Orders API cita o pagador `APRO`).
-3. Regravar as respostas do `MercadoPagoPaymentGatewayTest` com o sandbox e registrar a evidência para o vídeo.
-
-A documentação marca a Payments API como legada e recomenda a Orders API para integrações novas (V1). A troca fica
-restrita ao adapter; o domínio e os casos de uso não mudam.
 
 ## API (via API Gateway)
 
@@ -105,7 +93,7 @@ restrita ao adapter; o domínio e os casos de uso não mudam.
 | `GET` | `/me/budgets/{orderNumber}` | CLIENT | orçamento próprio (OS de outro cliente = 404) |
 | `POST` | `/me/budgets/{orderNumber}/approval` | CLIENT | `{decision: APPROVE\|REJECT}` |
 | `GET` | `/me/budgets/{orderNumber}/payment` | CLIENT | Pix atual: copia e cola, QR Code, validade, situação |
-| `POST` | `/webhooks/mercadopago` | assinatura | notificação de pagamento |
+| `POST` | `/webhooks/stripe` | assinatura | notificação de pagamento |
 | `POST` | `/admin/payments/{paymentId}/simulate` | ADMIN | **só dev/hml** com o provedor simulado: `{status: APPROVED\|REJECTED\|EXPIRED}` |
 
 OpenAPI em `/q/openapi`. Erros em JSON com `correlationId` e sem stacktrace: 400 entrada inválida, 401/403, 404, 409
@@ -119,7 +107,7 @@ application/     BillingCommandHandler + strategies (GenerateBudget, RequestPaym
                  BudgetService (decisões e consultas), PaymentSyncService (webhook, reconciliação, expiração),
                  EventPublisher, BillingMessageFactory, portas in/out — Java puro, sem anotações de framework
 infrastructure/  JPA (repositórios, outbox, inbox, TransactionRunner), SQS (consumidor, relay, jobs),
-                 Mercado Pago (API + adapter + assinatura), provedor simulado, e-mail, métricas, composição (CDI)
+                 Stripe (API + adapter + assinatura), provedor simulado, e-mail, métricas, composição (CDI)
 interfaces/      REST (admin, cliente, público, webhook, simulação), filtros de correlação e de gateway, erros
 ```
 
@@ -148,8 +136,8 @@ mvn verify   # exige Docker (PostgreSQL pelos Dev Services e LocalStack via Test
 | Domínio | `BudgetTest`, `PaymentTest`, `ValueObjectsTest` — transições válidas e inválidas, idempotência, dinheiro, token |
 | Casos de uso | `BillingApplicationTest` — todos os comandos, decisões, webhook, reconciliação e expiração, sobre banco em memória com as mesmas garantias |
 | Contrato | `BillingContractTest` — os 13 eventos validam no schema; os comandos de exemplo do OS são tratados |
-| Adapter Mercado Pago | `MercadoPagoPaymentGatewayTest` — servidor HTTP local no formato documentado: cabeçalhos, corpo do Pix, QR Code, situações, erros transitórios × recusas |
-| Webhook | `WebhookResourceTest`, `WebhookSignatureTest` — assinatura inválida, corpo adulterado (a consulta prevalece), duplicado, desconhecido, tamanho |
+| Adapter Stripe | `StripePaymentGatewayTest` — servidor HTTP local no formato de um PaymentIntent Pix real do sandbox: cabeçalhos, corpo form-urlencoded, centavos, QR Code, estados, erros transitórios × recusas, chave nunca vazada |
+| Webhook | `WebhookResourceTest`, `StripeSignatureTest` — assinatura inválida, relógio (replay), rotação de segredo, corpo adulterado (a consulta prevalece), reentrega, desconhecido, tamanho |
 | Persistência | `PersistenceIntegrationTest` — dois pagamentos concorrentes (só um sobrevive), trava otimista, expiração com `SKIP LOCKED`, relay parando na primeira falha |
 | Fluxo pelas filas | `BillingFlowIntegrationTest` — comando na fila → banco → outbox → resposta, com correlação; entrega duplicada; estorno recusado |
 | API | `BillingApiTest` — três canais de decisão, 401/403/404/422/503, Pix do cliente, simulação |
@@ -177,3 +165,17 @@ todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). O depl
 - Se o provedor criar o Pix e a resposta se perder depois das tentativas, o pagamento local fica `FAILED` e o cliente
   não recebe aquele QR Code; a Saga trata como falha de pagamento.
 - A rota de simulação substitui o banco do cliente só em dev/hml; em produção ela responde 404.
+
+## Stripe (Pix, modo de teste)
+
+`PAYMENT_PROVIDER=stripe` liga o adapter. Configuração (SSM `SecureString`, nunca no repositório):
+
+| Variável | Origem |
+|---|---|
+| `STRIPE_API_KEY` | `/oficina/<env>/stripe_api_key` — chave restrita de **teste** (`rk_test_…`) |
+| `STRIPE_WEBHOOK_SECRET` | `/oficina/<env>/stripe_webhook_secret` — `whsec_…` do endpoint |
+| `STRIPE_API_VERSION` | opcional; fixa `Stripe-Version` (vazio = padrão da conta) |
+
+A URL do endpoint de webhook muda a cada sessão do Academy: o deploy a atualiza (`POST /v1/webhook_endpoints/{id}`), o
+`whsec_` não muda. O QR do Pix vem como copia e cola (`qrCode`) e página hospedada (`ticketUrl`); a Stripe não devolve
+base64, então `qrCodeBase64` é nulo. Decisão: [ADR 0023](https://github.com/victor-duarte-mendonca/oficina-app/blob/homolog/docs/adr/0023-pagamento-stripe-atras-de-porta.md).

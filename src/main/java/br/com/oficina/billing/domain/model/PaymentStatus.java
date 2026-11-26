@@ -11,7 +11,7 @@ package br.com.oficina.billing.domain.model;
  * </pre>
  *
  * {@code REQUESTED} existe para gravar a chave de idempotência <b>antes</b> de chamar o provedor (spec 05 §4, V6):
- * se o pod cair no meio da chamada, a reentrega do comando reusa a mesma chave e o Mercado Pago não cobra duas vezes.
+ * se o pod cair no meio da chamada, a reentrega do comando reusa a mesma chave e a Stripe não cobra duas vezes.
  */
 public enum PaymentStatus {
     REQUESTED, PENDING, APPROVED, REJECTED, EXPIRED, FAILED, REFUND_PENDING, REFUNDED, REFUND_FAILED;
