@@ -174,7 +174,7 @@ todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). O depl
 |---|---|
 | `STRIPE_API_KEY` | `/oficina/<env>/stripe_api_key` — chave restrita de **teste** (`rk_test_…`) |
 | `STRIPE_WEBHOOK_SECRET` | `/oficina/<env>/stripe_webhook_secret` — `whsec_…` do endpoint |
-| `STRIPE_API_VERSION` | opcional; fixa `Stripe-Version` (vazio = padrão da conta) |
+| `STRIPE_API_VERSION` | `Stripe-Version` enviado nas chamadas; padrão `2026-11-18.endive` (a mesma do endpoint de webhook de prod). Vazio = padrão da conta |
 
 A URL do endpoint de webhook muda a cada sessão do Academy: o deploy a atualiza (`POST /v1/webhook_endpoints/{id}`), o
 `whsec_` não muda. O QR do Pix vem como copia e cola (`qrCode`) e página hospedada (`ticketUrl`); a Stripe não devolve
