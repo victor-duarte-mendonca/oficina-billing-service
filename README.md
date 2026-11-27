@@ -148,8 +148,25 @@ O `mvn verify` reprova abaixo de **80% de linhas e 70% de ramos** do serviço (e
 ## CI/CD
 
 `.github/workflows/ci.yml`: `build-test` (testes + gate), `docker-build` (imagem + Trivy), `secret-scan` (gitleaks em
-todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). O deploy no k3s entra com o banco e as filas
-(spec 12). Análise SonarCloud: spec 10.
+todo o histórico) e `workflow-lint` (actionlint, shellcheck, kustomize). Análise SonarCloud: spec 10.
+
+`.github/workflows/deploy.yml` (independente dos outros serviços; `homolog` → `hml`/`homologacao`, `main` → `prod`/`producao`
+com aprovação manual):
+
+```
+image   consulta /oficina/<env>/ecr_billing_url no SSM → build → Trivy (CRITICAL corrigível) → push (tag = SHA)
+deploy  túnel SSM ao k3s → Secret (banco, filas, Stripe lidos do SSM) → kubectl apply -k → rollout status
+        → smoke test (scripts/smoke-test.sh) → reaponta o webhook da Stripe → rollback automático se falhar
+```
+
+- **Sob demanda**: sem stack ou sem sessão AWS, o push passa verde com um aviso; o disparo manual (*Run workflow*) trata a falta como erro. O deploy não executa Terraform.
+- **Pré-requisitos**: o `oficina-app` já publicado no ambiente (namespace e chave pública do JWT); parâmetros SSM `ecr_billing_url`, `billing/db_endpoint`, `billing/db_name`, `sqs/billing_commands_url`, `sqs/os_replies_url`, `stripe_api_key`, `stripe_webhook_secret`.
+- **Environment** (`homologacao`/`producao`): secrets `DB_USERNAME`, `DB_PASSWORD` e `APP_GATEWAY_KEY` (obrigatório em prod); variável `STRIPE_WEBHOOK_ENDPOINT_ID` (`we_…` do endpoint do ambiente). Os `AWS_*` são da organização e expiram com a sessão do Academy.
+- **Stripe**: chave e `whsec_` são validados por prefixo (`rk_test_`/`sk_test_`, `whsec_`) antes de entrar no Secret; em prod a falta deles é erro, em hml o serviço cai para o provedor simulado.
+- **Webhook**: a URL do API Gateway muda a cada sessão. `scripts/update-stripe-webhook.sh` (no fim do deploy) e o workflow `stripe-webhook-url.yml` (manual, para quando o gateway sobe depois) reapontam o endpoint; o `whsec_` não muda.
+- **Rollback**: `kubectl rollout undo` se o rollout ou o smoke test falharem; o rollback de um serviço não afeta os outros.
+- **Ordem numa mudança de contrato**: consumidor primeiro, produtor depois; remoção só numa versão posterior.
+- **Reproduzir localmente**: `mvn verify` (testes + gate JaCoCo), `docker build .`, `shellcheck scripts/*.sh`, `kubectl kustomize k8s/overlays/hml`.
 
 ## Segurança
 
