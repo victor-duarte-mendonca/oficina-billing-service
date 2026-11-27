@@ -1,0 +1,36 @@
+name: Stripe webhook URL
+
+# Reaponta o endpoint de webhook da Stripe para o API Gateway da sessao atual (spec 05 S3). Use depois de aplicar o
+# oficina-auth-lambda (que publica /oficina/<env>/api_gateway_url) ou quando a sessao do Academy mudar a URL.
+# O deploy do Billing ja faz o mesmo no fim, mas o gateway costuma subir DEPOIS do deploy.
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: "Ambiente (hml usa o environment homologacao; prod, producao)"
+        required: true
+        default: hml
+        type: choice
+        options: [hml, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  webhook-url:
+    name: webhook-url
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.stack == 'prod' && 'producao' || 'homologacao' }}
+    env:
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      STACK_ENV: ${{ inputs.stack }}
+      WEBHOOK_ENDPOINT_ID: ${{ vars.STRIPE_WEBHOOK_ENDPOINT_ID }}
+      STRICT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Atualizar a URL do endpoint
+        run: bash scripts/update-stripe-webhook.sh
